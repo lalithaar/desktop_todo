@@ -22,7 +22,7 @@ static ITEMS: Mutex<Vec<TodoItem>> = Mutex::new(Vec::new());
 
 fn load_items() {
     if let Ok(data) = fs::read_to_string("tasks.json") {
-        if let Ok(parsed) = serde_json::from_str(&data) {
+        if let Ok(parsed) = serde_json::from_str::<Vec<TodoItem>>(&data) {
             *ITEMS.lock().unwrap() = parsed;
             return;
         }
@@ -89,7 +89,7 @@ unsafe extern "system" fn wndproc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
 
-            // Fill background
+            // Translucent dark slate background fill
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect);
             let bg_brush = CreateSolidBrush(COLORREF(0x1E1E1E));
@@ -98,7 +98,7 @@ unsafe extern "system" fn wndproc(
 
             SetBkMode(hdc, TRANSPARENT);
 
-            // Title Font
+            // Title rendering
             let title_font = CreateFontW(
                 22, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
                 DEFAULT_CHARSET.0 as u32,
@@ -115,7 +115,7 @@ unsafe extern "system" fn wndproc(
             DrawTextW(hdc, &mut title, &mut title_rect, DT_LEFT | DT_SINGLELINE);
             DeleteObject(title_font);
 
-            // Task List Font
+            // Item rendering
             let text_font = CreateFontW(
                 16, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
                 DEFAULT_CHARSET.0 as u32,
@@ -166,6 +166,7 @@ unsafe extern "system" fn wndproc(
                 }
             }
 
+            // Drag window when clicking anywhere outside tasks
             ReleaseCapture().unwrap_or(());
             SendMessageW(hwnd, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as _), LPARAM(0));
             LRESULT(0)
