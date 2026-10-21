@@ -2,6 +2,7 @@ use crate::app::{AppState, Ui};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 // ---------------------------------------------------------------- layout ----
 
@@ -269,7 +270,7 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
         }
 
         // text
-        SetTextColor(hdc, if task.done { DONE } else { TEXT });
+        SetTextColor(hdc, COLORREF(if task.done { DONE } else { TEXT }));
         let mut text_rect = RECT {
             left: TEXT_X,
             top: row_y + 2,

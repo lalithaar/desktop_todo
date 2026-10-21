@@ -11,7 +11,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetCursorPos, ReleaseCapture, SetCapture, SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN, VK_SPACE,
+    ReleaseCapture, SetCapture, SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -532,7 +532,7 @@ fn clamp_scroll(hwnd: HWND) {
 unsafe fn sync_layout(hwnd: HWND) {
     let count = APP.lock().unwrap().tasks.len();
     let height = render::height_for(count);
-    let (w, h) = client_size(hwnd);
+    let (_, h) = client_size(hwnd);
     if h != height {
         let mut wr = RECT::default();
         let _ = GetWindowRect(hwnd, &mut wr);
