@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod autostart;
 mod render;
 mod state;
 
@@ -28,6 +29,7 @@ const MENU_DELETE: usize = 102;
 const MENU_ADD: usize = 103;
 const MENU_CLEAR: usize = 104;
 const MENU_EXIT: usize = 105;
+const MENU_AUTOSTART: usize = 106;
 
 const ID_INPUT: usize = 0x1001;
 const ID_EDITOR: usize = 0x1002;
@@ -978,6 +980,17 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
     append_menu(menu, MENU_ADD, "Add task");
     append_menu(menu, MENU_CLEAR, "Clear completed");
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+    if autostart::is_enabled() {
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING | MF_CHECKED,
+            MENU_AUTOSTART,
+            PCWSTR(wide("Start with Windows").as_ptr()),
+        );
+    } else {
+        append_menu(menu, MENU_AUTOSTART, "Start with Windows");
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     append_menu(menu, MENU_EXIT, "Exit");
 
     let _ = SetForegroundWindow(hwnd);
@@ -1020,6 +1033,17 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
             clear_completed();
             sync_layout(hwnd);
         }
+        MENU_AUTOSTART => {
+            let enabled = autostart::is_enabled();
+            if let Err(err) = autostart::set_enabled(!enabled) {
+                let _ = MessageBoxW(
+                    HWND(std::ptr::null_mut()),
+                    PCWSTR(wide(&err).as_ptr()),
+                    PCWSTR(wide("Desktop Todo").as_ptr()),
+                    MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONWARNING.0),
+                );
+            }
+        }
         MENU_EXIT => {
             save_all();
             let _ = DestroyWindow(hwnd);
@@ -1032,6 +1056,11 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
 }
 
 unsafe fn append_menu(menu: HMENU, id: usize, text: &str) {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide = wide(text);
     let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
+}
+
+/// Null terminated utf-16 copy of the given text.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
