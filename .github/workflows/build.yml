@@ -2,7 +2,8 @@ name: Build Desktop Todo
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "**" ]
+    tags: [ "**" ]
   workflow_dispatch: # Allows you to manually click "Run workflow" in GitHub
 
 jobs:
