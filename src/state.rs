@@ -40,7 +40,7 @@ impl AppState {
 }
 
 /// `%APPDATA%\DesktopTodo` (falls back to `%LOCALAPPDATA%`).
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     let root = std::env::var("APPDATA")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -57,6 +57,11 @@ fn data_dir() -> PathBuf {
 
 pub fn state_path() -> PathBuf {
     data_dir().join("tasks.json")
+}
+
+/// Log file used when the widget fails to start.
+pub fn log_path() -> PathBuf {
+    data_dir().join("startup.log")
 }
 
 pub fn load() -> AppState {

@@ -46,7 +46,23 @@ static EDIT_BRUSH: AtomicIsize = AtomicIsize::new(0);
 static ANCHOR: AtomicIsize = AtomicIsize::new(0);
 static ANCHOR_AGE: AtomicUsize = AtomicUsize::new(0);
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(err) = run() {
+        let detail = format!("Desktop Todo failed to start.\n\n{err:?}\n");
+        let _ = std::fs::create_dir_all(state::data_dir());
+        let _ = std::fs::write(state::log_path(), &detail);
+        unsafe {
+            let _ = MessageBoxW(
+                HWND(std::ptr::null_mut()),
+                w!("Desktop Todo could not start. See startup.log in %APPDATA%\\DesktopTodo."),
+                w!("Desktop Todo"),
+                MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONERROR.0),
+            );
+        }
+    }
+}
+
+fn run() -> Result<()> {
     {
         let fresh = !state::state_path().exists();
         let mut data = APP.lock().unwrap();
