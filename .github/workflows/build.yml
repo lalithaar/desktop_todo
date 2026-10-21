@@ -1,0 +1,26 @@
+name: Build Desktop Todo
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Allows you to manually click "Run workflow" in GitHub
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Upload Executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DesktopTodo-Windows
+          path: target/release/desktop_todo.exe
