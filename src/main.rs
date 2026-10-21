@@ -267,11 +267,13 @@ unsafe extern "system" fn wndproc(
         }
         WM_ACTIVATE => {
             let active = (lparam.0 & 0xFFFF) == WA_ACTIVE;
-            {
-                let mut ui = UI.lock().unwrap();
-                ui.interactive = active;
-            }
             if !active {
+                // Another window got the focus, so the widget may go back
+                // into the background now.
+                {
+                    let mut ui = UI.lock().unwrap();
+                    ui.interactive = false;
+                }
                 pin_to_background(hwnd);
             }
             LRESULT(0)
@@ -381,8 +383,11 @@ fn save_all() {
 
 /// Keeps the widget in the background unless the user is actively working in it.
 fn pin_to_background(hwnd: HWND) {
-    let interactive = UI.lock().unwrap().interactive;
-    if interactive {
+    let busy = {
+        let ui = UI.lock().unwrap();
+        ui.busy()
+    };
+    if busy {
         return;
     }
     unsafe {
@@ -452,22 +457,28 @@ unsafe fn desktop_anchor() -> Option<HWND> {
     let index = match host {
         Some(index) => index,
         None => {
-            // No icon view (unusual), fall back to the topmost shell window.
-            for hwnd in list.iter() {
+            // No icon view (unusual), fall back to the shell desktop window.
+            for (index, hwnd) in list.iter().enumerate() {
                 let class = class_name(*hwnd);
-                if class == "Progman" || class == "WorkerW" {
-                    return Some(*hwnd);
+                if class == "Progman" {
+                    host = Some(index);
+                    break;
                 }
             }
-            return None;
+            match host {
+                Some(index) => index,
+                None => return None,
+            }
         }
     };
 
-    // The window right below the icon host, so the widget is inserted
-    // directly in front of the desktop icons.
-    list.get(index + 1)
-        .copied()
-        .or_else(|| list.get(index).copied())
+    // The window right above the desktop layer. Inserting the widget behind
+    // it parks the widget directly on top of the desktop icons, so it stays
+    // visible and clickable while every application window still covers it.
+    if index == 0 {
+        return None;
+    }
+    list.get(index - 1).copied()
 }
 
 /// The anchor is cached for a couple of seconds, refreshing it is not free.
@@ -623,6 +634,10 @@ fn clear_completed() {
 // ------------------------------------------------------------- handlers -----
 
 unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.touch();
+    }
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     let (w, h) = client_size(hwnd);
@@ -670,6 +685,10 @@ unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
 }
 
 unsafe fn on_double_click(hwnd: HWND, lparam: LPARAM) {
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.touch();
+    }
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     let (_, h) = client_size(hwnd);
@@ -732,6 +751,10 @@ unsafe fn on_mouse_move(hwnd: HWND) {
 }
 
 unsafe fn on_right_up(hwnd: HWND, lparam: LPARAM) {
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.touch();
+    }
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     let (_, h) = client_size(hwnd);
@@ -752,6 +775,7 @@ unsafe fn on_mouse_wheel(hwnd: HWND, wparam: WPARAM) {
     let delta = (wparam.0 >> 16) as i16 as i32;
     {
         let mut ui = UI.lock().unwrap();
+        ui.touch();
         ui.scroll -= delta / 120 * ROW_H;
     }
     clamp_scroll(hwnd);

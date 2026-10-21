@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, POINT};
 
@@ -15,6 +16,8 @@ pub struct Ui {
     pub drag_origin: POINT,
     /// While true the widget is allowed to sit in front of other windows.
     pub interactive: bool,
+    /// Last time the user touched the widget, it stays in front for a while.
+    pub touched: Option<Instant>,
 }
 
 impl Ui {
@@ -27,6 +30,23 @@ impl Ui {
             drag_cursor: POINT { x: 0, y: 0 },
             drag_origin: POINT { x: 0, y: 0 },
             interactive: false,
+            touched: None,
+        }
+    }
+
+    /// Marks the widget as just used by the user.
+    pub fn touch(&mut self) {
+        self.touched = Some(Instant::now());
+    }
+
+    /// True while the widget should stay in front of the other windows.
+    pub fn busy(&self) -> bool {
+        if self.interactive || self.editing.is_some() || self.dragging {
+            return true;
+        }
+        match self.touched {
+            Some(at) => at.elapsed().as_millis() < 2500,
+            None => false,
         }
     }
 }
