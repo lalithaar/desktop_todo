@@ -82,6 +82,12 @@ fn run() -> Result<()> {
     }
 
     unsafe {
+        // Only one widget at a time, a second start just wakes the first one.
+        if let Ok(existing) = FindWindowW(w!("DesktopTodoWidgetClass"), PCWSTR::null()) {
+            let _ = SetForegroundWindow(existing);
+            return Ok(());
+        }
+
         let instance = GetModuleHandleW(PCWSTR::null())?;
         let class_name = w!("DesktopTodoWidgetClass");
 
