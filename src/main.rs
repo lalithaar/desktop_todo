@@ -89,7 +89,7 @@ fn run() -> Result<()> {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             lpszClassName: class_name,
-            hCursor: LoadCursorW(HINSTANCE(instance.0), IDC_ARROW)?,
+            hCursor: LoadCursorW(HINSTANCE(std::ptr::null_mut()), IDC_ARROW)?,
             style: CS_DBLCLKS,
             ..Default::default()
         };
