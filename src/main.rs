@@ -8,6 +8,7 @@ use windows::{
     Win32::Foundation::*,
     Win32::Graphics::Gdi::*,
     Win32::System::LibraryLoader::GetModuleHandleW,
+    Win32::UI::Input::KeyboardAndMouse::ReleaseCapture,
     Win32::UI::WindowsAndMessaging::*,
 };
 
@@ -26,7 +27,6 @@ fn load_items() {
             return;
         }
     }
-    // Default initial items
     *ITEMS.lock().unwrap() = vec![
         TodoItem { text: "visit dentist".into(), done: false },
         TodoItem { text: "go to canara bank".into(), done: false },
@@ -58,7 +58,6 @@ fn main() -> Result<()> {
 
         RegisterClassW(&wc);
 
-        // WS_EX_LAYERED enables transparency; WS_EX_TOPMOST keeps it pinned
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
             class_name,
@@ -68,7 +67,6 @@ fn main() -> Result<()> {
             None, None, instance, None,
         )?;
 
-        // Set opacity: 215 / 255 gives the dark frosted glass opacity
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 215, LWA_ALPHA)?;
 
         let mut msg = MSG::default();
@@ -91,33 +89,41 @@ unsafe extern "system" fn wndproc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
 
-            // Background fill
+            // Fill background
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect);
-            let bg_brush = CreateSolidBrush(COLORREF(0x1E1E1E)); // Dark grey
+            let bg_brush = CreateSolidBrush(COLORREF(0x1E1E1E));
             FillRect(hdc, &rect, bg_brush);
             DeleteObject(bg_brush);
 
             SetBkMode(hdc, TRANSPARENT);
 
-            // Draw "ToDo" Title
+            // Title Font
             let title_font = CreateFontW(
                 22, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Segoe UI"),
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                DEFAULT_PITCH.0 as u32,
+                w!("Segoe UI"),
             );
             SelectObject(hdc, title_font);
             SetTextColor(hdc, COLORREF(0xFFFFFF));
             let mut title_rect = RECT { left: 24, top: 20, right: 330, bottom: 50 };
-            let title = "ToDo\0".encode_utf16().collect::<Vec<u16>>();
-            DrawTextW(hdc, &title[..title.len() - 1], &mut title_rect, DT_LEFT | DT_SINGLELINE);
+            let mut title = "ToDo".encode_utf16().collect::<Vec<u16>>();
+            DrawTextW(hdc, &mut title, &mut title_rect, DT_LEFT | DT_SINGLELINE);
             DeleteObject(title_font);
 
-            // Draw Tasks
+            // Task List Font
             let text_font = CreateFontW(
                 16, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Segoe UI"),
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                DEFAULT_PITCH.0 as u32,
+                w!("Segoe UI"),
             );
             SelectObject(hdc, text_font);
 
@@ -126,18 +132,18 @@ unsafe extern "system" fn wndproc(
 
             for item in items.iter() {
                 let bullet = if item.done { "●  [DONE] " } else { "●  " };
-                let full_text = format!("{}{}\0", bullet, item.text);
-                let wide: Vec<u16> = full_text.encode_utf16().collect();
+                let full_text = format!("{}{}", bullet, item.text);
+                let mut wide: Vec<u16> = full_text.encode_utf16().collect();
 
                 let color = if item.done {
-                    COLORREF(0x7A7A7A) // Dim grey
+                    COLORREF(0x7A7A7A)
                 } else {
-                    COLORREF(0xDCDCDC) // Light text
+                    COLORREF(0xDCDCDC)
                 };
                 SetTextColor(hdc, color);
 
                 let mut item_rect = RECT { left: 24, top: y, right: 336, bottom: y + 24 };
-                DrawTextW(hdc, &wide[..wide.len() - 1], &mut item_rect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawTextW(hdc, &mut wide, &mut item_rect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 y += 28;
             }
 
@@ -146,7 +152,6 @@ unsafe extern "system" fn wndproc(
             LRESULT(0)
         }
 
-        // Left-click to drag the widget anywhere on the desktop
         WM_LBUTTONDOWN => {
             let y = (lparam.0 >> 16) as i16 as i32;
             if y >= 60 {
@@ -161,13 +166,11 @@ unsafe extern "system" fn wndproc(
                 }
             }
 
-            // If not clicking an item, start dragging the window
             ReleaseCapture().unwrap_or(());
             SendMessageW(hwnd, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as _), LPARAM(0));
             LRESULT(0)
         }
 
-        // Right-click an item to remove it
         WM_RBUTTONDOWN => {
             let y = (lparam.0 >> 16) as i16 as i32;
             if y >= 60 {
