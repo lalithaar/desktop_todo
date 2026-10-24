@@ -1,5 +1,7 @@
 # desktop-todo
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 A small, local, single-user todo list for Windows. Type a task, press Enter,
 close it, and it is still there next time. No accounts, no sync, no network.
 
@@ -116,3 +118,7 @@ cargo test
 ```
 
 The release build is `cargo build --release`.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
