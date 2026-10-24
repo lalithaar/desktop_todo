@@ -49,6 +49,9 @@ pub struct AppState {
     /// Index of the list that is currently on screen.
     #[serde(default)]
     pub active: usize,
+    /// Completed tasks are left out of the widget while this is set.
+    #[serde(default)]
+    pub hide_completed: bool,
     #[serde(default)]
     pub widget: Widget,
 }
@@ -58,6 +61,7 @@ impl AppState {
         AppState {
             lists: Vec::new(),
             active: 0,
+            hide_completed: false,
             widget: Widget { x: 64, y: 64 },
         }
     }
@@ -88,6 +92,16 @@ impl AppState {
             self.active = self.lists.len() - 1;
         }
         &mut self.lists[self.active].tasks
+    }
+
+    /// Indices of the tasks that are on screen right now, top to bottom.
+    pub fn visible(&self) -> Vec<usize> {
+        self.tasks()
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| !(self.hide_completed && task.done))
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// Steps to the next (positive) or previous (negative) list.
@@ -162,6 +176,7 @@ fn from_tasks(tasks: Vec<Task>, widget: Widget) -> AppState {
             tasks,
         }],
         active: 0,
+        hide_completed: false,
         widget,
     })
 }
@@ -314,6 +329,19 @@ mod tests {
         assert_eq!(state.lists.len(), 1);
         assert!(!state.remove_active_list());
         assert_eq!(state.lists.len(), 1);
+    }
+
+    #[test]
+    fn hides_completed_tasks_when_asked() {
+        let mut state = AppState::new();
+        let tasks = state.tasks_mut();
+        tasks.push(task("a", false));
+        tasks.push(task("b", true));
+        tasks.push(task("c", false));
+
+        assert_eq!(state.visible(), vec![0, 1, 2]);
+        state.hide_completed = true;
+        assert_eq!(state.visible(), vec![0, 2]);
     }
 
     #[test]

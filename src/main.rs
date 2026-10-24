@@ -33,6 +33,7 @@ const MENU_AUTOSTART: usize = 106;
 const MENU_NEW_LIST: usize = 107;
 const MENU_RENAME_LIST: usize = 108;
 const MENU_DELETE_LIST: usize = 109;
+const MENU_HIDE_COMPLETED: usize = 110;
 
 const ID_INPUT: usize = 0x1001;
 const ID_EDITOR: usize = 0x1002;
@@ -538,8 +539,9 @@ unsafe fn set_text(hwnd: HWND, text: &str) {
     let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
 }
 
-/// Index of the task that lives under the given client y coordinate.
-fn row_at(y: i32, scroll: i32, count: usize) -> Option<usize> {
+/// Task index that lives under the given client y coordinate. `visible` holds
+/// the task indices that are on screen, in display order.
+fn row_at(y: i32, scroll: i32, visible: &[usize]) -> Option<usize> {
     if y < TITLE_H {
         return None;
     }
@@ -547,19 +549,14 @@ fn row_at(y: i32, scroll: i32, count: usize) -> Option<usize> {
     if rel < 0 {
         return None;
     }
-    let index = (rel / ROW_H) as usize;
-    if index < count {
-        Some(index)
-    } else {
-        None
-    }
+    visible.get((rel / ROW_H) as usize).copied()
 }
 
 fn clamp_scroll(hwnd: HWND) {
     unsafe {
         let (_, h) = client_size(hwnd);
         let list_height = (h - TITLE_H - INPUT_H).max(0);
-        let count = APP.lock().unwrap().tasks().len() as i32;
+        let count = APP.lock().unwrap().visible().len() as i32;
         let max = (count * ROW_H - list_height).max(0);
         let mut ui = UI.lock().unwrap();
         ui.scroll = ui.scroll.clamp(0, max);
@@ -568,7 +565,7 @@ fn clamp_scroll(hwnd: HWND) {
 
 /// Resizes the widget to fit the task list and keeps the input field in place.
 unsafe fn sync_layout(hwnd: HWND) {
-    let count = APP.lock().unwrap().tasks().len();
+    let count = APP.lock().unwrap().visible().len();
     let height = render::height_for(count);
     let (_, h) = client_size(hwnd);
     if h != height {
@@ -596,15 +593,46 @@ unsafe fn sync_layout(hwnd: HWND) {
     clamp_scroll(hwnd);
 }
 
-fn toggle_task(index: usize) {
+/// Clears the cursor state when the selected task just disappeared.
+fn prune_selection() {
+    let app = APP.lock().unwrap();
+    if !app.hide_completed {
+        return;
+    }
+    let visible = app.visible();
+    let mut ui = UI.lock().unwrap();
+    if let Some(selected) = ui.selected {
+        if !visible.contains(&selected) {
+            ui.selected = None;
+        }
+    }
+}
+
+unsafe fn toggle_task(hwnd: HWND, index: usize) {
+    let mut hidden = false;
     {
         let mut app = APP.lock().unwrap();
+        let hide = app.hide_completed;
         let tasks = app.tasks_mut();
         if index < tasks.len() {
             tasks[index].done = !tasks[index].done;
+            hidden = hide && tasks[index].done;
         }
     }
+    if hidden {
+        prune_selection();
+    }
     save_all();
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+}
+
+unsafe fn set_hide_completed(hwnd: HWND, hide: bool) {
+    APP.lock().unwrap().hide_completed = hide;
+    prune_selection();
+    save_all();
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
 }
 
 fn delete_task(index: usize) {
@@ -740,10 +768,10 @@ unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
-    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
-    if let Some(index) = row_at(y, scroll, count) {
+    let (scroll, visible) = app::snapshot(|app, ui| (ui.scroll, app.visible()));
+    if let Some(index) = row_at(y, scroll, &visible) {
         if x >= PAD - 6 && x <= PAD + CHECK + 6 {
-            toggle_task(index);
+            toggle_task(hwnd, index);
         } else {
             let mut ui = UI.lock().unwrap();
             ui.selected = Some(index);
@@ -776,8 +804,8 @@ unsafe fn on_double_click(hwnd: HWND, lparam: LPARAM) {
     if x >= PAD - 6 && x <= PAD + CHECK + 6 {
         return;
     }
-    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
-    if let Some(index) = row_at(y, scroll, count) {
+    let (scroll, visible) = app::snapshot(|app, ui| (ui.scroll, app.visible()));
+    if let Some(index) = row_at(y, scroll, &visible) {
         start_editing(hwnd, index);
     }
 }
@@ -838,8 +866,8 @@ unsafe fn on_right_up(hwnd: HWND, lparam: LPARAM) {
     let (_, h) = client_size(hwnd);
 
     let target = if y >= TITLE_H && y < h - INPUT_H {
-        let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
-        row_at(y, scroll, count)
+        let (scroll, visible) = app::snapshot(|app, ui| (ui.scroll, app.visible()));
+        row_at(y, scroll, &visible)
     } else {
         None
     };
@@ -872,7 +900,7 @@ unsafe fn on_key_down(hwnd: HWND, wparam: WPARAM) {
         }
         k if k == VK_RETURN.0 as u32 || k == VK_SPACE.0 as u32 => {
             if let Some(index) = selected {
-                toggle_task(index);
+                toggle_task(hwnd, index);
             }
         }
         k if k == VK_ESCAPE.0 as u32 => {
@@ -993,18 +1021,23 @@ unsafe fn on_cancel(hwnd: HWND, tag: usize) {
 
 unsafe fn start_editing(hwnd: HWND, index: usize) {
     let editor = h_editor();
-    let text = {
-        let app = APP.lock().unwrap();
-        app.tasks()
+    let (text, placement) = app::snapshot(|app, ui| {
+        let row = app.visible().iter().position(|&task| task == index);
+        let text = app
+            .tasks()
             .get(index)
             .map(|t| t.text.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (text, row.map(|row| (row, ui.scroll)))
+    });
+    // The task is hidden (completed, or gone), nothing to edit.
+    let Some((row, scroll)) = placement else {
+        return;
     };
     set_text(editor, &text);
 
     let (w, _) = client_size(hwnd);
-    let scroll = UI.lock().unwrap().scroll;
-    let row_y = TITLE_H + index as i32 * ROW_H - scroll;
+    let row_y = TITLE_H + row as i32 * ROW_H - scroll;
     let _ = MoveWindow(
         editor,
         TEXT_X - 6,
@@ -1072,13 +1105,18 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
         Err(_) => return,
     };
 
-    let (done, list_count, list_name) = {
+    let (done, list_count, list_name, hide_completed) = {
         let app = APP.lock().unwrap();
         let done = target
             .and_then(|index| app.tasks().get(index))
             .map(|task| task.done)
             .unwrap_or(false);
-        (done, app.lists.len(), app.active_name().to_string())
+        (
+            done,
+            app.lists.len(),
+            app.active_name().to_string(),
+            app.hide_completed,
+        )
     };
 
     if target.is_some() {
@@ -1095,6 +1133,16 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
 
     append_menu(menu, MENU_ADD, "Add task");
     append_menu(menu, MENU_CLEAR, "Clear completed");
+    if hide_completed {
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING | MF_CHECKED,
+            MENU_HIDE_COMPLETED,
+            PCWSTR(wide("Hide completed").as_ptr()),
+        );
+    } else {
+        append_menu(menu, MENU_HIDE_COMPLETED, "Hide completed");
+    }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     append_menu(menu, MENU_NEW_LIST, "New list");
     append_menu(menu, MENU_RENAME_LIST, &format!("Rename \"{list_name}\""));
@@ -1136,7 +1184,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
     match cmd.0 as usize {
         MENU_TOGGLE => {
             if let Some(index) = target {
-                toggle_task(index);
+                toggle_task(hwnd, index);
             }
         }
         MENU_EDIT => {
@@ -1155,6 +1203,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
             clear_completed();
             sync_layout(hwnd);
         }
+        MENU_HIDE_COMPLETED => set_hide_completed(hwnd, !hide_completed),
         MENU_NEW_LIST => add_list(hwnd),
         MENU_RENAME_LIST => start_renaming(hwnd),
         MENU_DELETE_LIST => remove_list(hwnd),

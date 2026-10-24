@@ -241,7 +241,13 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
     let list_top = TITLE_H;
     let list_bottom = h - INPUT_H;
 
-    if app.tasks().is_empty() {
+    let visible = app.visible();
+    if visible.is_empty() {
+        let hint_text = if app.tasks().is_empty() {
+            "No tasks yet - add one below"
+        } else {
+            "All done - nothing left"
+        };
         SetTextColor(hdc, COLORREF(MUTED));
         let mut hint_rect = RECT {
             left: PAD,
@@ -249,7 +255,7 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
             right: w - PAD,
             bottom: list_top + 32,
         };
-        let mut hint: Vec<u16> = "No tasks yet - add one below".encode_utf16().collect();
+        let mut hint: Vec<u16> = hint_text.encode_utf16().collect();
         DrawTextW(
             hdc,
             &mut hint,
@@ -265,8 +271,9 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
     let font = ui_font(-15, false);
     let old = SelectObject(hdc, font);
 
-    for (index, task) in app.tasks().iter().enumerate() {
-        let row_y = list_top + index as i32 * ROW_H - ui.scroll;
+    for (row, &index) in visible.iter().enumerate() {
+        let task = &app.tasks()[index];
+        let row_y = list_top + row as i32 * ROW_H - ui.scroll;
         if row_y + ROW_H <= list_top || row_y >= list_bottom {
             continue;
         }
