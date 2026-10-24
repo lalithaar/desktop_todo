@@ -5,6 +5,7 @@ mod autostart;
 mod render;
 mod state;
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 use windows::core::*;
@@ -12,7 +13,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, SetFocus, VK_DELETE, VK_ESCAPE, VK_RETURN, VK_SPACE,
+    GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE,
+    VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -595,33 +597,85 @@ unsafe fn sync_layout(hwnd: HWND) {
     clamp_scroll(hwnd);
 }
 
-/// Clears the cursor state when the selected task just disappeared.
+/// Drops selected indices that are no longer on screen.
 fn prune_selection() {
     let app = APP.lock().unwrap();
-    if !app.hide_completed {
-        return;
-    }
-    let visible = app.visible();
+    let visible: BTreeSet<usize> = app.visible().into_iter().collect();
     let mut ui = UI.lock().unwrap();
-    if let Some(selected) = ui.selected {
-        if !visible.contains(&selected) {
-            ui.selected = None;
+    ui.selected.retain(|index| visible.contains(index));
+}
+
+/// Replaces the selection with a single task.
+fn select_only(index: usize) {
+    let mut ui = UI.lock().unwrap();
+    ui.selected.clear();
+    ui.selected.insert(index);
+}
+
+/// Ctrl+click adds or removes one task, a plain click selects only that one.
+fn select_task(index: usize, additive: bool) {
+    let mut ui = UI.lock().unwrap();
+    if additive {
+        if !ui.selected.remove(&index) {
+            ui.selected.insert(index);
         }
+    } else {
+        ui.selected.clear();
+        ui.selected.insert(index);
     }
 }
 
-unsafe fn toggle_task(hwnd: HWND, index: usize) {
-    let mut hidden = false;
+fn selected_tasks() -> Vec<usize> {
+    UI.lock().unwrap().selected.iter().copied().collect()
+}
+
+unsafe fn toggle_tasks(hwnd: HWND, indices: &[usize]) {
+    let mut hid_some = false;
     {
         let mut app = APP.lock().unwrap();
         let hide = app.hide_completed;
         let tasks = app.tasks_mut();
-        if index < tasks.len() {
-            tasks[index].done = !tasks[index].done;
-            hidden = hide && tasks[index].done;
+        for &index in indices {
+            if let Some(task) = tasks.get_mut(index) {
+                task.done = !task.done;
+                hid_some |= hide && task.done;
+            }
         }
     }
-    if hidden {
+    if hid_some {
+        prune_selection();
+    }
+    save_all();
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+}
+
+unsafe fn toggle_selected(hwnd: HWND) {
+    let indices = selected_tasks();
+    if !indices.is_empty() {
+        toggle_tasks(hwnd, &indices);
+    }
+}
+
+/// Sets the same done state on every selected task.
+unsafe fn set_done_selected(hwnd: HWND, done: bool) {
+    let indices = selected_tasks();
+    if indices.is_empty() {
+        return;
+    }
+    let mut hid_some = false;
+    {
+        let mut app = APP.lock().unwrap();
+        let hide = app.hide_completed;
+        let tasks = app.tasks_mut();
+        for index in indices {
+            if let Some(task) = tasks.get_mut(index) {
+                task.done = done;
+                hid_some |= hide && done;
+            }
+        }
+    }
+    if hid_some {
         prune_selection();
     }
     save_all();
@@ -637,35 +691,48 @@ unsafe fn set_hide_completed(hwnd: HWND, hide: bool) {
     let _ = InvalidateRect(hwnd, None, TRUE);
 }
 
-fn delete_task(index: usize) {
+/// Removes the given tasks and keeps the inline editor on the same task.
+unsafe fn delete_tasks(hwnd: HWND, indices: &[usize]) {
+    let mut removed = indices.to_vec();
+    removed.sort_unstable();
+    removed.dedup();
+    if removed.is_empty() {
+        return;
+    }
     {
         let mut app = APP.lock().unwrap();
         let tasks = app.tasks_mut();
-        if index < tasks.len() {
-            tasks.remove(index);
+        for &index in removed.iter().rev() {
+            if index < tasks.len() {
+                tasks.remove(index);
+            }
         }
     }
     let mut hide_editor = false;
     {
         let mut ui = UI.lock().unwrap();
-        ui.selected = None;
-        match ui.editing {
-            Some(Editing::Task(edit)) if edit == index => {
+        ui.selected.clear();
+        if let Some(Editing::Task(edit)) = ui.editing {
+            if removed.contains(&edit) {
                 ui.editing = None;
                 hide_editor = true;
+            } else {
+                let shift = removed.iter().filter(|&&index| index < edit).count();
+                ui.editing = Some(Editing::Task(edit - shift));
             }
-            Some(Editing::Task(edit)) if edit > index => {
-                ui.editing = Some(Editing::Task(edit - 1));
-            }
-            _ => {}
         }
     }
     if hide_editor {
-        unsafe {
-            let _ = ShowWindow(h_editor(), SW_HIDE);
-        }
+        let _ = ShowWindow(h_editor(), SW_HIDE);
     }
     save_all();
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+}
+
+unsafe fn delete_selected(hwnd: HWND) {
+    let indices = selected_tasks();
+    delete_tasks(hwnd, &indices);
 }
 
 fn clear_completed() {
@@ -673,6 +740,7 @@ fn clear_completed() {
         let mut app = APP.lock().unwrap();
         app.tasks_mut().retain(|task| !task.done);
     }
+    UI.lock().unwrap().selected.clear();
     save_all();
 }
 
@@ -682,7 +750,7 @@ fn clear_completed() {
 unsafe fn reset_list_view(hwnd: HWND) {
     {
         let mut ui = UI.lock().unwrap();
-        ui.selected = None;
+        ui.selected.clear();
         ui.editing = None;
         ui.scroll = 0;
     }
@@ -712,15 +780,16 @@ unsafe fn remove_list(hwnd: HWND) {
     }
 }
 
-/// Sends the given task of the visible list to the end of another list.
-unsafe fn move_task(hwnd: HWND, to: usize, index: usize) {
-    if !APP.lock().unwrap().move_task(to, index) {
+/// Sends the selected tasks of the visible list to the end of another list.
+unsafe fn move_selected(hwnd: HWND, to: usize) {
+    let indices = selected_tasks();
+    if indices.is_empty() {
         return;
     }
-    {
-        let mut ui = UI.lock().unwrap();
-        ui.selected = None;
+    if !APP.lock().unwrap().move_tasks(to, &indices) {
+        return;
     }
+    UI.lock().unwrap().selected.clear();
     save_all();
     sync_layout(hwnd);
     let _ = InvalidateRect(hwnd, None, TRUE);
@@ -787,10 +856,12 @@ unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
     let (scroll, visible) = app::snapshot(|app, ui| (ui.scroll, app.visible()));
     if let Some(index) = row_at(y, scroll, &visible) {
         if x >= PAD - 6 && x <= PAD + CHECK + 6 {
-            toggle_task(hwnd, index);
+            toggle_tasks(hwnd, &[index]);
         } else {
-            let mut ui = UI.lock().unwrap();
-            ui.selected = Some(index);
+            // The widget does not take the focus when a row is clicked, so
+            // the async state is the reliable one here.
+            let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
+            select_task(index, ctrl);
         }
         let _ = InvalidateRect(hwnd, None, TRUE);
     }
@@ -822,6 +893,7 @@ unsafe fn on_double_click(hwnd: HWND, lparam: LPARAM) {
     }
     let (scroll, visible) = app::snapshot(|app, ui| (ui.scroll, app.visible()));
     if let Some(index) = row_at(y, scroll, &visible) {
+        select_only(index);
         start_editing(hwnd, index);
     }
 }
@@ -888,6 +960,16 @@ unsafe fn on_right_up(hwnd: HWND, lparam: LPARAM) {
         None
     };
 
+    // Right-clicking outside the selection moves the selection there first,
+    // so the menu actions always apply to what the user is pointing at.
+    if let Some(index) = target {
+        let already = UI.lock().unwrap().selected.contains(&index);
+        if !already {
+            select_only(index);
+            let _ = InvalidateRect(hwnd, None, TRUE);
+        }
+    }
+
     let mut pt = POINT { x, y };
     let _ = ClientToScreen(hwnd, &mut pt);
     show_menu(hwnd, pt.x, pt.y, target);
@@ -906,22 +988,11 @@ unsafe fn on_mouse_wheel(hwnd: HWND, wparam: WPARAM) {
 
 unsafe fn on_key_down(hwnd: HWND, wparam: WPARAM) {
     let key = wparam.0 as u32;
-    let selected = UI.lock().unwrap().selected;
     match key {
-        k if k == VK_DELETE.0 as u32 => {
-            if let Some(index) = selected {
-                delete_task(index);
-                sync_layout(hwnd);
-            }
-        }
-        k if k == VK_RETURN.0 as u32 || k == VK_SPACE.0 as u32 => {
-            if let Some(index) = selected {
-                toggle_task(hwnd, index);
-            }
-        }
+        k if k == VK_DELETE.0 as u32 => delete_selected(hwnd),
+        k if k == VK_RETURN.0 as u32 || k == VK_SPACE.0 as u32 => toggle_selected(hwnd),
         k if k == VK_ESCAPE.0 as u32 => {
-            let mut ui = UI.lock().unwrap();
-            ui.selected = None;
+            UI.lock().unwrap().selected.clear();
         }
         _ => {}
     }
@@ -929,12 +1000,8 @@ unsafe fn on_key_down(hwnd: HWND, wparam: WPARAM) {
 }
 
 unsafe fn on_app_key(hwnd: HWND, key: usize) {
-    let selected = UI.lock().unwrap().selected;
-    if let Some(index) = selected {
-        if key == VK_DELETE.0 as usize {
-            delete_task(index);
-            sync_layout(hwnd);
-        }
+    if key == VK_DELETE.0 as usize {
+        delete_selected(hwnd);
     }
     let _ = InvalidateRect(hwnd, None, TRUE);
 }
@@ -1121,26 +1188,39 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
         Err(_) => return,
     };
 
-    let (done, list_names, active, hide_completed) = {
+    let (selected, all_done, list_names, active, hide_completed) = {
         let app = APP.lock().unwrap();
-        let done = target
-            .and_then(|index| app.tasks().get(index))
-            .map(|task| task.done)
-            .unwrap_or(false);
+        let selected: Vec<usize> = UI.lock().unwrap().selected.iter().copied().collect();
+        let all_done = !selected.is_empty()
+            && selected.iter().all(|&index| {
+                app.tasks()
+                    .get(index)
+                    .map(|task| task.done)
+                    .unwrap_or(false)
+            });
         let names: Vec<String> = app.lists.iter().map(|list| list.name.clone()).collect();
-        (done, names, app.active, app.hide_completed)
+        (selected, all_done, names, app.active, app.hide_completed)
     };
 
     if target.is_some() {
-        let label = if done {
-            "Mark as not done"
-        } else {
-            "Mark as done"
+        let count = selected.len();
+        let label = match (all_done, count) {
+            (true, 1) => "Mark as not done".to_string(),
+            (true, n) => format!("Mark {n} as not done"),
+            (false, 1) => "Mark as done".to_string(),
+            (false, n) => format!("Mark {n} as done"),
         };
-        append_menu(menu, MENU_TOGGLE, label);
-        append_menu(menu, MENU_EDIT, "Edit task");
+        append_menu(menu, MENU_TOGGLE, &label);
+        if count <= 1 {
+            append_menu(menu, MENU_EDIT, "Edit task");
+        }
         append_move_menu(menu, &list_names, active);
-        append_menu(menu, MENU_DELETE, "Delete task");
+        let delete_label = if count > 1 {
+            format!("Delete {count} tasks")
+        } else {
+            "Delete task".to_string()
+        };
+        append_menu(menu, MENU_DELETE, &delete_label);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     }
 
@@ -1196,33 +1276,20 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
     }
 
     match cmd.0 as usize {
-        MENU_TOGGLE => {
-            if let Some(index) = target {
-                toggle_task(hwnd, index);
-            }
-        }
+        MENU_TOGGLE => set_done_selected(hwnd, !all_done),
         MENU_EDIT => {
             if let Some(index) = target {
                 start_editing(hwnd, index);
             }
         }
-        MENU_DELETE => {
-            if let Some(index) = target {
-                delete_task(index);
-                sync_layout(hwnd);
-            }
-        }
+        MENU_DELETE => delete_selected(hwnd),
         MENU_ADD => focus_input(hwnd),
         MENU_CLEAR => {
             clear_completed();
             sync_layout(hwnd);
         }
         MENU_HIDE_COMPLETED => set_hide_completed(hwnd, !hide_completed),
-        MENU_MOVE_BASE.. => {
-            if let Some(index) = target {
-                move_task(hwnd, (cmd.0 as usize) - MENU_MOVE_BASE, index);
-            }
-        }
+        MENU_MOVE_BASE.. => move_selected(hwnd, (cmd.0 as usize) - MENU_MOVE_BASE),
         MENU_NEW_LIST => add_list(hwnd),
         MENU_RENAME_LIST => start_renaming(hwnd),
         MENU_DELETE_LIST => remove_list(hwnd),

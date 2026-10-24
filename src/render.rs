@@ -278,7 +278,7 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
             continue;
         }
 
-        if ui.selected == Some(index) {
+        if ui.selected.contains(&index) {
             let mut sel = RECT {
                 left: 0,
                 top: row_y,

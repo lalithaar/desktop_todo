@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -16,7 +17,8 @@ pub enum Editing {
 /// Widget only state (never persisted).
 pub struct Ui {
     pub scroll: i32,
-    pub selected: Option<usize>,
+    /// Task indices, ctrl+click keeps adding to the set.
+    pub selected: BTreeSet<usize>,
     pub editing: Option<Editing>,
     pub dragging: bool,
     pub drag_cursor: POINT,
@@ -31,7 +33,7 @@ impl Ui {
     pub const fn new() -> Self {
         Ui {
             scroll: 0,
-            selected: None,
+            selected: BTreeSet::new(),
             editing: None,
             dragging: false,
             drag_cursor: POINT { x: 0, y: 0 },

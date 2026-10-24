@@ -149,17 +149,30 @@ impl AppState {
         }
     }
 
-    /// Moves a task of the visible list to the end of another list.
-    pub fn move_task(&mut self, to: usize, index: usize) -> bool {
+    /// Moves the given tasks of the visible list to the end of another list,
+    /// keeping their relative order.
+    pub fn move_tasks(&mut self, to: usize, indices: &[usize]) -> bool {
         if to == self.active || to >= self.lists.len() {
             return false;
         }
         let from = self.active.min(self.lists.len() - 1);
-        if index >= self.lists[from].tasks.len() {
+        let mut sorted: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&index| index < self.lists[from].tasks.len())
+            .collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.is_empty() {
             return false;
         }
-        let task = self.lists[from].tasks.remove(index);
-        self.lists[to].tasks.push(task);
+
+        let mut moving = Vec::with_capacity(sorted.len());
+        for &index in sorted.iter().rev() {
+            moving.push(self.lists[from].tasks.remove(index));
+        }
+        moving.reverse();
+        self.lists[to].tasks.extend(moving);
         true
     }
 }
@@ -359,22 +372,27 @@ mod tests {
     }
 
     #[test]
-    fn moves_a_task_to_another_list() {
+    fn moves_tasks_to_another_list() {
         let mut state = AppState::new();
         state
             .tasks_mut()
-            .extend([task("a", false), task("b", false)]);
+            .extend([task("a", false), task("b", false), task("c", false)]);
         state.add_list();
         state.cycle_list(-1);
         assert_eq!(state.active_name(), DEFAULT_LIST);
 
-        assert!(state.move_task(1, 1));
-        assert_eq!(state.lists[0].tasks, vec![task("a", false)]);
-        assert_eq!(state.lists[1].tasks, vec![task("b", false)]);
+        // out of order on purpose, order has to survive the move
+        assert!(state.move_tasks(1, &[2, 0]));
+        assert_eq!(state.lists[0].tasks, vec![task("b", false)]);
+        assert_eq!(
+            state.lists[1].tasks,
+            vec![task("a", false), task("c", false)]
+        );
 
-        assert!(!state.move_task(0, 0)); // already there
-        assert!(!state.move_task(5, 0)); // no such list
-        assert!(!state.move_task(1, 7)); // no such task
+        assert!(!state.move_tasks(0, &[0])); // already there
+        assert!(!state.move_tasks(5, &[0])); // no such list
+        assert!(!state.move_tasks(1, &[7])); // no such task
+        assert!(!state.move_tasks(1, &[]));
     }
 
     #[test]
