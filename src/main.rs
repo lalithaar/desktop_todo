@@ -34,6 +34,8 @@ const MENU_NEW_LIST: usize = 107;
 const MENU_RENAME_LIST: usize = 108;
 const MENU_DELETE_LIST: usize = 109;
 const MENU_HIDE_COMPLETED: usize = 110;
+/// `MENU_MOVE_BASE + list index` for the "Move to" submenu entries.
+const MENU_MOVE_BASE: usize = 200;
 
 const ID_INPUT: usize = 0x1001;
 const ID_EDITOR: usize = 0x1002;
@@ -710,6 +712,20 @@ unsafe fn remove_list(hwnd: HWND) {
     }
 }
 
+/// Sends the given task of the visible list to the end of another list.
+unsafe fn move_task(hwnd: HWND, to: usize, index: usize) {
+    if !APP.lock().unwrap().move_task(to, index) {
+        return;
+    }
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.selected = None;
+    }
+    save_all();
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+}
+
 fn active_list_count() -> usize {
     APP.lock().unwrap().lists.len()
 }
@@ -1105,18 +1121,14 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
         Err(_) => return,
     };
 
-    let (done, list_count, list_name, hide_completed) = {
+    let (done, list_names, active, hide_completed) = {
         let app = APP.lock().unwrap();
         let done = target
             .and_then(|index| app.tasks().get(index))
             .map(|task| task.done)
             .unwrap_or(false);
-        (
-            done,
-            app.lists.len(),
-            app.active_name().to_string(),
-            app.hide_completed,
-        )
+        let names: Vec<String> = app.lists.iter().map(|list| list.name.clone()).collect();
+        (done, names, app.active, app.hide_completed)
     };
 
     if target.is_some() {
@@ -1127,6 +1139,7 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
         };
         append_menu(menu, MENU_TOGGLE, label);
         append_menu(menu, MENU_EDIT, "Edit task");
+        append_move_menu(menu, &list_names, active);
         append_menu(menu, MENU_DELETE, "Delete task");
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     }
@@ -1145,8 +1158,9 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
     }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     append_menu(menu, MENU_NEW_LIST, "New list");
-    append_menu(menu, MENU_RENAME_LIST, &format!("Rename \"{list_name}\""));
-    if list_count > 1 {
+    let active_name = list_names.get(active).cloned().unwrap_or_default();
+    append_menu(menu, MENU_RENAME_LIST, &format!("Rename \"{active_name}\""));
+    if list_names.len() > 1 {
         append_menu(menu, MENU_DELETE_LIST, "Delete list");
     }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
@@ -1204,6 +1218,11 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
             sync_layout(hwnd);
         }
         MENU_HIDE_COMPLETED => set_hide_completed(hwnd, !hide_completed),
+        MENU_MOVE_BASE.. => {
+            if let Some(index) = target {
+                move_task(hwnd, (cmd.0 as usize) - MENU_MOVE_BASE, index);
+            }
+        }
         MENU_NEW_LIST => add_list(hwnd),
         MENU_RENAME_LIST => start_renaming(hwnd),
         MENU_DELETE_LIST => remove_list(hwnd),
@@ -1230,8 +1249,33 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
 }
 
 unsafe fn append_menu(menu: HMENU, id: usize, text: &str) {
-    let wide = wide(text);
+    // "&" marks an accelerator, list names may legitimately contain one.
+    let label = text.replace('&', "&&");
+    let wide = wide(&label);
     let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(wide.as_ptr()));
+}
+
+/// Adds the "Move to" submenu, one entry per list other than `active`.
+unsafe fn append_move_menu(menu: HMENU, names: &[String], active: usize) {
+    if names.len() < 2 {
+        return;
+    }
+    let submenu = match CreatePopupMenu() {
+        Ok(submenu) => submenu,
+        Err(_) => return,
+    };
+    for (index, name) in names.iter().enumerate() {
+        if index != active {
+            append_menu(submenu, MENU_MOVE_BASE + index, name);
+        }
+    }
+    let title = wide("Move to");
+    let _ = AppendMenuW(
+        menu,
+        MF_POPUP,
+        submenu.0 as usize,
+        PCWSTR(title.as_ptr()),
+    );
 }
 
 /// Null terminated utf-16 copy of the given text.

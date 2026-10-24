@@ -148,6 +148,20 @@ impl AppState {
             list.name = name.to_string();
         }
     }
+
+    /// Moves a task of the visible list to the end of another list.
+    pub fn move_task(&mut self, to: usize, index: usize) -> bool {
+        if to == self.active || to >= self.lists.len() {
+            return false;
+        }
+        let from = self.active.min(self.lists.len() - 1);
+        if index >= self.lists[from].tasks.len() {
+            return false;
+        }
+        let task = self.lists[from].tasks.remove(index);
+        self.lists[to].tasks.push(task);
+        true
+    }
 }
 
 /// Fills in the bits a hand edited (or very old) file may be missing.
@@ -342,6 +356,25 @@ mod tests {
         assert_eq!(state.visible(), vec![0, 1, 2]);
         state.hide_completed = true;
         assert_eq!(state.visible(), vec![0, 2]);
+    }
+
+    #[test]
+    fn moves_a_task_to_another_list() {
+        let mut state = AppState::new();
+        state
+            .tasks_mut()
+            .extend([task("a", false), task("b", false)]);
+        state.add_list();
+        state.cycle_list(-1);
+        assert_eq!(state.active_name(), DEFAULT_LIST);
+
+        assert!(state.move_task(1, 1));
+        assert_eq!(state.lists[0].tasks, vec![task("a", false)]);
+        assert_eq!(state.lists[1].tasks, vec![task("b", false)]);
+
+        assert!(!state.move_task(0, 0)); // already there
+        assert!(!state.move_task(5, 0)); // no such list
+        assert!(!state.move_task(1, 7)); // no such task
     }
 
     #[test]
