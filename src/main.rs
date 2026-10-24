@@ -16,8 +16,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use app::{h_editor, h_input, set_editor, set_input, Task, APP, UI};
-use render::{CHECK, INPUT_H, PAD, ROW_H, TEXT_X, TITLE_H, WIDGET_W};
+use app::{h_editor, h_input, set_editor, set_input, Editing, Task, APP, UI};
+use render::{CHECK, INPUT_H, NAV_ARROW, NAV_NAME, PAD, ROW_H, TEXT_X, TITLE_H, WIDGET_W};
 
 const WM_APP_COMMIT: u32 = WM_APP + 1;
 const WM_APP_CANCEL: u32 = WM_APP + 2;
@@ -30,6 +30,9 @@ const MENU_ADD: usize = 103;
 const MENU_CLEAR: usize = 104;
 const MENU_EXIT: usize = 105;
 const MENU_AUTOSTART: usize = 106;
+const MENU_NEW_LIST: usize = 107;
+const MENU_RENAME_LIST: usize = 108;
+const MENU_DELETE_LIST: usize = 109;
 
 const ID_INPUT: usize = 0x1001;
 const ID_EDITOR: usize = 0x1002;
@@ -77,7 +80,7 @@ fn run() -> Result<()> {
                     GetSystemMetrics(SM_CYSCREEN),
                 )
             };
-            let height = render::height_for(data.tasks.len());
+            let height = render::height_for(data.tasks().len());
             data.widget.x = (screen_w - WIDGET_W - 40).max(40);
             data.widget.y = (screen_h - height - 90).max(40);
         }
@@ -107,7 +110,7 @@ fn run() -> Result<()> {
             let data = APP.lock().unwrap();
             (data.widget.x, data.widget.y)
         };
-        let rows = APP.lock().unwrap().tasks.len();
+        let rows = APP.lock().unwrap().tasks().len();
 
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED,
@@ -556,7 +559,7 @@ fn clamp_scroll(hwnd: HWND) {
     unsafe {
         let (_, h) = client_size(hwnd);
         let list_height = (h - TITLE_H - INPUT_H).max(0);
-        let count = APP.lock().unwrap().tasks.len() as i32;
+        let count = APP.lock().unwrap().tasks().len() as i32;
         let max = (count * ROW_H - list_height).max(0);
         let mut ui = UI.lock().unwrap();
         ui.scroll = ui.scroll.clamp(0, max);
@@ -565,7 +568,7 @@ fn clamp_scroll(hwnd: HWND) {
 
 /// Resizes the widget to fit the task list and keeps the input field in place.
 unsafe fn sync_layout(hwnd: HWND) {
-    let count = APP.lock().unwrap().tasks.len();
+    let count = APP.lock().unwrap().tasks().len();
     let height = render::height_for(count);
     let (_, h) = client_size(hwnd);
     if h != height {
@@ -596,8 +599,9 @@ unsafe fn sync_layout(hwnd: HWND) {
 fn toggle_task(index: usize) {
     {
         let mut app = APP.lock().unwrap();
-        if index < app.tasks.len() {
-            app.tasks[index].done = !app.tasks[index].done;
+        let tasks = app.tasks_mut();
+        if index < tasks.len() {
+            tasks[index].done = !tasks[index].done;
         }
     }
     save_all();
@@ -606,8 +610,9 @@ fn toggle_task(index: usize) {
 fn delete_task(index: usize) {
     {
         let mut app = APP.lock().unwrap();
-        if index < app.tasks.len() {
-            app.tasks.remove(index);
+        let tasks = app.tasks_mut();
+        if index < tasks.len() {
+            tasks.remove(index);
         }
     }
     let mut hide_editor = false;
@@ -615,11 +620,13 @@ fn delete_task(index: usize) {
         let mut ui = UI.lock().unwrap();
         ui.selected = None;
         match ui.editing {
-            Some(edit) if edit == index => {
+            Some(Editing::Task(edit)) if edit == index => {
                 ui.editing = None;
                 hide_editor = true;
             }
-            Some(edit) if edit > index => ui.editing = Some(edit - 1),
+            Some(Editing::Task(edit)) if edit > index => {
+                ui.editing = Some(Editing::Task(edit - 1));
+            }
             _ => {}
         }
     }
@@ -634,9 +641,49 @@ fn delete_task(index: usize) {
 fn clear_completed() {
     {
         let mut app = APP.lock().unwrap();
-        app.tasks.retain(|task| !task.done);
+        app.tasks_mut().retain(|task| !task.done);
     }
     save_all();
+}
+
+// ------------------------------------------------------------- lists --------
+
+/// Forgets the per list cursor state after the visible list changed.
+unsafe fn reset_list_view(hwnd: HWND) {
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.selected = None;
+        ui.editing = None;
+        ui.scroll = 0;
+    }
+    let _ = ShowWindow(h_editor(), SW_HIDE);
+    sync_layout(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+}
+
+unsafe fn switch_list(hwnd: HWND, step: isize) {
+    let changed = APP.lock().unwrap().cycle_list(step);
+    if changed {
+        save_all();
+        reset_list_view(hwnd);
+    }
+}
+
+unsafe fn add_list(hwnd: HWND) {
+    APP.lock().unwrap().add_list();
+    save_all();
+    reset_list_view(hwnd);
+}
+
+unsafe fn remove_list(hwnd: HWND) {
+    if APP.lock().unwrap().remove_active_list() {
+        save_all();
+        reset_list_view(hwnd);
+    }
+}
+
+fn active_list_count() -> usize {
+    APP.lock().unwrap().lists.len()
 }
 
 // ------------------------------------------------------------- handlers -----
@@ -655,6 +702,19 @@ unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
             save_all();
             let _ = DestroyWindow(hwnd);
             return;
+        }
+        // the "<" / ">" list switcher
+        let count = active_list_count();
+        if count > 1 {
+            let left = render::name_left(count);
+            if x < left {
+                switch_list(hwnd, -1);
+                return;
+            }
+            if x >= left + NAV_NAME && x < left + NAV_NAME + NAV_ARROW + 4 {
+                switch_list(hwnd, 1);
+                return;
+            }
         }
         // drag the widget around
         let mut pt = POINT::default();
@@ -680,7 +740,7 @@ unsafe fn on_left_down(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
-    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks.len()));
+    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
     if let Some(index) = row_at(y, scroll, count) {
         if x >= PAD - 6 && x <= PAD + CHECK + 6 {
             toggle_task(index);
@@ -700,13 +760,23 @@ unsafe fn on_double_click(hwnd: HWND, lparam: LPARAM) {
     let x = (lparam.0 & 0xFFFF) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
     let (_, h) = client_size(hwnd);
+
+    if y < TITLE_H {
+        // double click on the list name renames it
+        let left = render::name_left(active_list_count());
+        if x >= left && x < left + NAV_NAME {
+            start_renaming(hwnd);
+        }
+        return;
+    }
+
     if y >= h - INPUT_H {
         return;
     }
     if x >= PAD - 6 && x <= PAD + CHECK + 6 {
         return;
     }
-    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks.len()));
+    let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
     if let Some(index) = row_at(y, scroll, count) {
         start_editing(hwnd, index);
     }
@@ -768,7 +838,7 @@ unsafe fn on_right_up(hwnd: HWND, lparam: LPARAM) {
     let (_, h) = client_size(hwnd);
 
     let target = if y >= TITLE_H && y < h - INPUT_H {
-        let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks.len()));
+        let (scroll, count) = app::snapshot(|app, ui| (ui.scroll, app.tasks().len()));
         row_at(y, scroll, count)
     } else {
         None
@@ -853,23 +923,33 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM) {
 
 unsafe fn on_commit(hwnd: HWND, tag: usize) {
     if tag == 0 {
-        // inline editor
+        // inline editor, either a task or the list name
         let editor = h_editor();
         let text = window_text(editor);
-        let index = {
+        let editing = {
             let mut ui = UI.lock().unwrap();
             ui.editing.take()
         };
-        if let Some(index) = index {
-            let trimmed = text.trim().to_string();
-            let mut app = APP.lock().unwrap();
-            if index < app.tasks.len() {
-                if trimmed.is_empty() {
-                    app.tasks.remove(index);
-                } else {
-                    app.tasks[index].text = trimmed;
+        match editing {
+            Some(Editing::Task(index)) => {
+                let trimmed = text.trim().to_string();
+                let mut app = APP.lock().unwrap();
+                let tasks = app.tasks_mut();
+                if index < tasks.len() {
+                    if trimmed.is_empty() {
+                        tasks.remove(index);
+                    } else {
+                        tasks[index].text = trimmed;
+                    }
                 }
             }
+            Some(Editing::Name) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    APP.lock().unwrap().rename_active(trimmed);
+                }
+            }
+            None => {}
         }
         let _ = ShowWindow(editor, SW_HIDE);
         {
@@ -886,7 +966,7 @@ unsafe fn on_commit(hwnd: HWND, tag: usize) {
         let trimmed = text.trim().to_string();
         if !trimmed.is_empty() {
             let mut app = APP.lock().unwrap();
-            app.tasks.push(Task {
+            app.tasks_mut().push(Task {
                 text: trimmed,
                 done: false,
             });
@@ -915,7 +995,10 @@ unsafe fn start_editing(hwnd: HWND, index: usize) {
     let editor = h_editor();
     let text = {
         let app = APP.lock().unwrap();
-        app.tasks.get(index).map(|t| t.text.clone()).unwrap_or_default()
+        app.tasks()
+            .get(index)
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
     };
     set_text(editor, &text);
 
@@ -935,7 +1018,38 @@ unsafe fn start_editing(hwnd: HWND, index: usize) {
 
     {
         let mut ui = UI.lock().unwrap();
-        ui.editing = Some(index);
+        ui.editing = Some(Editing::Task(index));
+        ui.interactive = true;
+    }
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetFocus(editor);
+}
+
+/// Reuses the inline editor to rename the list that is on screen.
+unsafe fn start_renaming(hwnd: HWND) {
+    let name = {
+        let app = APP.lock().unwrap();
+        app.active_name().to_string()
+    };
+    let editor = h_editor();
+    set_text(editor, &name);
+
+    let (w, _) = client_size(hwnd);
+    let left = render::name_left(active_list_count());
+    let _ = MoveWindow(
+        editor,
+        left - 4,
+        (TITLE_H - 8 - 24) / 2,
+        (NAV_NAME + 8).min((w - left - PAD).max(40)),
+        24,
+        TRUE,
+    );
+    let _ = ShowWindow(editor, SW_SHOW);
+    SendMessageW(editor, EM_SETSEL, WPARAM(0), LPARAM(-1));
+
+    {
+        let mut ui = UI.lock().unwrap();
+        ui.editing = Some(Editing::Name);
         ui.interactive = true;
     }
     let _ = SetForegroundWindow(hwnd);
@@ -958,14 +1072,16 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
         Err(_) => return,
     };
 
-    if let Some(index) = target {
-        let done = APP
-            .lock()
-            .unwrap()
-            .tasks
-            .get(index)
+    let (done, list_count, list_name) = {
+        let app = APP.lock().unwrap();
+        let done = target
+            .and_then(|index| app.tasks().get(index))
             .map(|task| task.done)
             .unwrap_or(false);
+        (done, app.lists.len(), app.active_name().to_string())
+    };
+
+    if target.is_some() {
         let label = if done {
             "Mark as not done"
         } else {
@@ -979,6 +1095,12 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
 
     append_menu(menu, MENU_ADD, "Add task");
     append_menu(menu, MENU_CLEAR, "Clear completed");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+    append_menu(menu, MENU_NEW_LIST, "New list");
+    append_menu(menu, MENU_RENAME_LIST, &format!("Rename \"{list_name}\""));
+    if list_count > 1 {
+        append_menu(menu, MENU_DELETE_LIST, "Delete list");
+    }
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     if autostart::is_enabled() {
         let _ = AppendMenuW(
@@ -1033,6 +1155,9 @@ unsafe fn show_menu(hwnd: HWND, x: i32, y: i32, target: Option<usize>) {
             clear_completed();
             sync_layout(hwnd);
         }
+        MENU_NEW_LIST => add_list(hwnd),
+        MENU_RENAME_LIST => start_renaming(hwnd),
+        MENU_DELETE_LIST => remove_list(hwnd),
         MENU_AUTOSTART => {
             let enabled = autostart::is_enabled();
             if let Err(err) = autostart::set_enabled(!enabled) {

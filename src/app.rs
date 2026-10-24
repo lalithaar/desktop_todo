@@ -6,11 +6,18 @@ use windows::Win32::Foundation::{HWND, POINT};
 
 pub use crate::state::{AppState, Task};
 
+/// What the inline editor is currently working on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Editing {
+    Task(usize),
+    Name,
+}
+
 /// Widget only state (never persisted).
 pub struct Ui {
     pub scroll: i32,
     pub selected: Option<usize>,
-    pub editing: Option<usize>,
+    pub editing: Option<Editing>,
     pub dragging: bool,
     pub drag_cursor: POINT,
     pub drag_origin: POINT,

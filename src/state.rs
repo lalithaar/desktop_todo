@@ -2,12 +2,30 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Task {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub done: bool,
+}
+
+/// One named task list, the widget shows one of them at a time.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct List {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tasks: Vec<Task>,
+}
+
+impl List {
+    pub fn new(name: &str) -> Self {
+        List {
+            name: name.to_string(),
+            tasks: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -22,10 +40,15 @@ impl Default for Widget {
     }
 }
 
+pub const DEFAULT_LIST: &str = "ToDo";
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AppState {
     #[serde(default)]
-    pub tasks: Vec<Task>,
+    pub lists: Vec<List>,
+    /// Index of the list that is currently on screen.
+    #[serde(default)]
+    pub active: usize,
     #[serde(default)]
     pub widget: Widget,
 }
@@ -33,10 +56,123 @@ pub struct AppState {
 impl AppState {
     pub const fn new() -> Self {
         AppState {
-            tasks: Vec::new(),
+            lists: Vec::new(),
+            active: 0,
             widget: Widget { x: 64, y: 64 },
         }
     }
+
+    pub fn active_list(&self) -> Option<&List> {
+        self.lists.get(self.active)
+    }
+
+    pub fn active_name(&self) -> &str {
+        self.active_list()
+            .map(|list| list.name.as_str())
+            .unwrap_or("")
+    }
+
+    /// Tasks of the list that is currently on screen.
+    pub fn tasks(&self) -> &[Task] {
+        self.active_list()
+            .map(|list| list.tasks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn tasks_mut(&mut self) -> &mut Vec<Task> {
+        if self.lists.is_empty() {
+            self.lists.push(List::new(DEFAULT_LIST));
+            self.active = 0;
+        }
+        if self.active >= self.lists.len() {
+            self.active = self.lists.len() - 1;
+        }
+        &mut self.lists[self.active].tasks
+    }
+
+    /// Steps to the next (positive) or previous (negative) list.
+    pub fn cycle_list(&mut self, step: isize) -> bool {
+        let len = self.lists.len();
+        if len < 2 {
+            return false;
+        }
+        let current = self.active.min(len - 1) as isize;
+        self.active = (current + step).rem_euclid(len as isize) as usize;
+        true
+    }
+
+    /// Appends an empty list and switches to it.
+    pub fn add_list(&mut self) -> usize {
+        let mut number = self.lists.len() + 1;
+        let name = loop {
+            let candidate = format!("List {number}");
+            if !self.lists.iter().any(|list| list.name == candidate) {
+                break candidate;
+            }
+            number += 1;
+        };
+        self.lists.push(List::new(&name));
+        self.active = self.lists.len() - 1;
+        self.active
+    }
+
+    /// Removes the visible list, the widget always keeps at least one.
+    pub fn remove_active_list(&mut self) -> bool {
+        if self.lists.len() < 2 {
+            return false;
+        }
+        let index = self.active.min(self.lists.len() - 1);
+        self.lists.remove(index);
+        if self.active >= self.lists.len() {
+            self.active = self.lists.len() - 1;
+        }
+        true
+    }
+
+    pub fn rename_active(&mut self, name: &str) {
+        if let Some(list) = self.lists.get_mut(self.active) {
+            list.name = name.to_string();
+        }
+    }
+}
+
+/// Fills in the bits a hand edited (or very old) file may be missing.
+fn normalized(mut state: AppState) -> AppState {
+    if state.lists.is_empty() {
+        state.lists.push(List::new(DEFAULT_LIST));
+    }
+    for (index, list) in state.lists.iter_mut().enumerate() {
+        let name = list.name.trim().to_string();
+        if name.is_empty() {
+            list.name = format!("List {}", index + 1);
+        } else {
+            list.name = name;
+        }
+    }
+    if state.active >= state.lists.len() {
+        state.active = state.lists.len() - 1;
+    }
+    state
+}
+
+fn from_tasks(tasks: Vec<Task>, widget: Widget) -> AppState {
+    normalized(AppState {
+        lists: vec![List {
+            name: DEFAULT_LIST.to_string(),
+            tasks,
+        }],
+        active: 0,
+        widget,
+    })
+}
+
+/// Shape of the file written before lists existed.
+#[derive(Deserialize)]
+struct LegacyState {
+    #[serde(default)]
+    tasks: Vec<Task>,
+    #[serde(default)]
+    widget: Widget,
 }
 
 /// `%APPDATA%\DesktopTodo` (falls back to `%LOCALAPPDATA%`).
@@ -68,31 +204,40 @@ pub fn load() -> AppState {
     let path = state_path();
 
     if let Ok(text) = fs::read_to_string(&path) {
-        if let Ok(state) = serde_json::from_str::<AppState>(&text) {
+        if let Some(state) = parse(&text) {
             return state;
-        }
-        // Older builds stored a bare array of tasks.
-        if let Ok(tasks) = serde_json::from_str::<Vec<Task>>(&text) {
-            return AppState {
-                tasks,
-                widget: Widget::default(),
-            };
         }
     }
 
     // One time migration of the file old builds dropped next to the executable.
     if let Ok(text) = fs::read_to_string("tasks.json") {
         if let Ok(tasks) = serde_json::from_str::<Vec<Task>>(&text) {
-            let state = AppState {
-                tasks,
-                widget: Widget::default(),
-            };
+            let state = from_tasks(tasks, Widget::default());
             let _ = save(&state);
             return state;
         }
     }
 
-    AppState::new()
+    normalized(AppState::new())
+}
+
+/// Reads a state file, falling back to the formats older builds wrote.
+fn parse(text: &str) -> Option<AppState> {
+    if let Ok(state) = serde_json::from_str::<AppState>(text) {
+        // A file without any list predates lists, its tasks are still in the
+        // top level `tasks` field.
+        if !state.lists.is_empty() {
+            return Some(normalized(state));
+        }
+    }
+    if let Ok(old) = serde_json::from_str::<LegacyState>(text) {
+        return Some(from_tasks(old.tasks, old.widget));
+    }
+    // Very old builds stored a bare array of tasks.
+    if let Ok(tasks) = serde_json::from_str::<Vec<Task>>(text) {
+        return Some(from_tasks(tasks, Widget::default()));
+    }
+    None
 }
 
 pub fn save(state: &AppState) -> Result<(), String> {
@@ -103,4 +248,78 @@ pub fn save(state: &AppState) -> Result<(), String> {
     fs::write(&tmp, json).map_err(|e| e.to_string())?;
     fs::rename(&tmp, dir.join("tasks.json")).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(text: &str, done: bool) -> Task {
+        Task {
+            text: text.to_string(),
+            done,
+        }
+    }
+
+    #[test]
+    fn reads_the_list_format() {
+        let state =
+            parse(r#"{"lists":[{"name":"Home","tasks":[{"text":"a","done":true}]}],"active":0}"#)
+                .unwrap();
+        assert_eq!(state.lists.len(), 1);
+        assert_eq!(state.active_name(), "Home");
+        assert_eq!(state.tasks(), &[task("a", true)]);
+    }
+
+    #[test]
+    fn migrates_a_flat_task_file() {
+        let state =
+            parse(r#"{"tasks":[{"text":"a","done":false}],"widget":{"x":5,"y":6}}"#).unwrap();
+        assert_eq!(state.lists.len(), 1);
+        assert_eq!(state.active_name(), DEFAULT_LIST);
+        assert_eq!(state.tasks(), &[task("a", false)]);
+        assert_eq!(state.widget.x, 5);
+        assert_eq!(state.widget.y, 6);
+    }
+
+    #[test]
+    fn migrates_a_bare_task_array() {
+        let state = parse(r#"[{"text":"a","done":false}]"#).unwrap();
+        assert_eq!(state.lists.len(), 1);
+        assert_eq!(state.tasks(), &[task("a", false)]);
+    }
+
+    #[test]
+    fn rejects_a_broken_file() {
+        assert!(parse("not json").is_none());
+    }
+
+    #[test]
+    fn switches_between_lists() {
+        let mut state = AppState::new();
+        state.add_list();
+        state.add_list();
+        assert_eq!(state.active, 1);
+        assert_eq!(state.active_name(), "List 2");
+        assert!(state.cycle_list(1));
+        assert_eq!(state.active, 0);
+        assert!(state.cycle_list(-1));
+        assert_eq!(state.active, 1);
+    }
+
+    #[test]
+    fn keeps_the_last_list() {
+        let mut state = AppState::new();
+        state.tasks_mut().push(task("a", false));
+        assert_eq!(state.lists.len(), 1);
+        assert!(!state.remove_active_list());
+        assert_eq!(state.lists.len(), 1);
+    }
+
+    #[test]
+    fn restores_a_valid_active_list() {
+        let state = parse(r#"{"lists":[{"name":"a"},{"name":"b"}],"active":9}"#).unwrap();
+        assert_eq!(state.active, 1);
+        assert_eq!(state.active_name(), "b");
+    }
 }

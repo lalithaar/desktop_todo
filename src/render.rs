@@ -16,6 +16,11 @@ pub const WIDGET_W: i32 = 330;
 pub const MIN_ROWS: i32 = 2;
 pub const MAX_ROWS: i32 = 12;
 
+// list switcher in the title bar
+pub const NAV_ARROW: i32 = 18;
+pub const NAV_GAP: i32 = 4;
+pub const NAV_NAME: i32 = 130;
+
 // ---------------------------------------------------------------- colors ----
 
 const fn rgb(r: u32, g: u32, b: u32) -> u32 {
@@ -37,6 +42,16 @@ const WHITE: u32 = rgb(0xFF, 0xFF, 0xFF);
 pub fn height_for(task_count: usize) -> i32 {
     let rows = (task_count as i32).clamp(MIN_ROWS, MAX_ROWS);
     TITLE_H + INPUT_H + rows * ROW_H
+}
+
+/// Left edge of the list name in the title bar. The arrows are only drawn
+/// when there is more than one list, the name then moves right to make room.
+pub fn name_left(list_count: usize) -> i32 {
+    if list_count > 1 {
+        PAD + NAV_ARROW + NAV_GAP
+    } else {
+        PAD
+    }
 }
 
 // --------------------------------------------------------------- helpers ----
@@ -91,6 +106,22 @@ unsafe fn ui_font(height: i32, bold: bool) -> HFONT {
 
 // --------------------------------------------------------------- drawing ----
 
+unsafe fn draw_arrow(hdc: HDC, left: i32, glyph: &str) {
+    let mut rect = RECT {
+        left,
+        top: 0,
+        right: left + NAV_ARROW,
+        bottom: TITLE_H - 8,
+    };
+    let mut text: Vec<u16> = glyph.encode_utf16().collect();
+    DrawTextW(
+        hdc,
+        &mut text,
+        &mut rect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
+}
+
 pub fn paint(hwnd: HWND) {
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -116,27 +147,36 @@ pub fn paint(hwnd: HWND) {
 }
 
 unsafe fn draw_title(hdc: HDC, w: i32, app: &AppState) {
+    let count = app.lists.len();
+    let name_x = name_left(count);
+
     let font = ui_font(-19, true);
     let old = SelectObject(hdc, font);
     SetTextColor(hdc, COLORREF(TEXT));
-    let mut title_rect = RECT {
-        left: PAD,
+    let mut name_rect = RECT {
+        left: name_x,
         top: 0,
-        right: w - 120,
+        right: name_x + NAV_NAME,
         bottom: TITLE_H - 8,
     };
-    let mut title: Vec<u16> = "ToDo".encode_utf16().collect();
+    let mut name: Vec<u16> = app.active_name().encode_utf16().collect();
     DrawTextW(
         hdc,
-        &mut title,
-        &mut title_rect,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        &mut name,
+        &mut name_rect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
+
+    if count > 1 {
+        SetTextColor(hdc, COLORREF(ACCENT));
+        draw_arrow(hdc, PAD, "<");
+        draw_arrow(hdc, name_x + NAV_NAME, ">");
+    }
     SelectObject(hdc, old);
     let _ = DeleteObject(font);
 
-    let open = app.tasks.iter().filter(|t| !t.done).count();
-    let label = if app.tasks.is_empty() {
+    let open = app.tasks().iter().filter(|t| !t.done).count();
+    let label = if app.tasks().is_empty() {
         "no tasks".to_string()
     } else if open == 0 {
         "all done".to_string()
@@ -201,7 +241,7 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
     let list_top = TITLE_H;
     let list_bottom = h - INPUT_H;
 
-    if app.tasks.is_empty() {
+    if app.tasks().is_empty() {
         SetTextColor(hdc, COLORREF(MUTED));
         let mut hint_rect = RECT {
             left: PAD,
@@ -225,7 +265,7 @@ unsafe fn draw_list(hdc: HDC, w: i32, h: i32, app: &AppState, ui: &Ui) {
     let font = ui_font(-15, false);
     let old = SelectObject(hdc, font);
 
-    for (index, task) in app.tasks.iter().enumerate() {
+    for (index, task) in app.tasks().iter().enumerate() {
         let row_y = list_top + index as i32 * ROW_H - ui.scroll;
         if row_y + ROW_H <= list_top || row_y >= list_bottom {
             continue;
